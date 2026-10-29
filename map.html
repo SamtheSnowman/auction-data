@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>마이하우스 지도</title>
+<style>
+  html, body, #map { margin: 0; height: 100%; font-family: -apple-system, 'Apple SD Gothic Neo', sans-serif; }
+  .pin { position: relative; padding: 5px 8px; border-radius: 8px; color: #fff; font-weight: 800; font-size: 13px; white-space: nowrap; box-shadow: 0 2px 4px rgba(0,0,0,.25); }
+  .pin:after { content: ''; position: absolute; left: 50%; bottom: -6px; margin-left: -6px; border: 6px solid transparent; border-bottom: 0; border-top-color: inherit; }
+  .cl { width: 46px; height: 46px; border-radius: 50%; border: 2px solid #fff; color: #fff; font-weight: 800; font-size: 13px; display: flex; align-items: center; justify-content: center; box-shadow: 0 1px 4px rgba(0,0,0,.3); opacity: .9; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<script>
+// 앱(WebView)이 불러 쓰는 카카오맵 화면. 물건 목록은 앱이 setItems 로 넘겨 주고, 핀을 누르면 앱으로 알린다.
+const COLORS = { c: '#3B6FD8', o: '#2E7D32', t: '#E07A1F' }; // 경매·공매·매매 (앱의 kindColors 와 같게)
+const GOLD = '#C8963E';
+const MAX_PINS = 120;
+let map, items = [], overlays = [], selected = null;
+
+const post = (m) => (window.App ? App.postMessage(JSON.stringify(m)) : console.log(m));
+const key = new URLSearchParams(location.search).get('key');
+const sdk = document.createElement('script');
+sdk.src = `https://dapi.kakao.com/v2/maps/sdk.js?appkey=${encodeURIComponent(key || '')}&autoload=false`;
+sdk.onload = () => kakao.maps.load(init);
+sdk.onerror = () => post({ type: 'error', msg: '카카오맵을 불러오지 못했습니다' });
+document.head.appendChild(sdk);
+
+function init() {
+  map = new kakao.maps.Map(document.getElementById('map'), { center: new kakao.maps.LatLng(37.5665, 126.978), level: 7 });
+  kakao.maps.event.addListener(map, 'idle', render);
+  kakao.maps.event.addListener(map, 'click', () => { selected = null; render(); post({ type: 'tap' }); });
+  post({ type: 'ready' });
+}
+
+// items: [[id, 위도, 경도, 'c'|'o'|'t', '가격'], ...]
+window.setItems = (arr) => { items = arr; if (map) render(); };
+window.moveTo = (lat, lng, level) => { map.setLevel(level); map.setCenter(new kakao.maps.LatLng(lat, lng)); };
+window.fitTo = (pts) => {
+  if (!pts.length) return;
+  if (pts.length === 1) return moveTo(pts[0][0], pts[0][1], 3);
+  const b = new kakao.maps.LatLngBounds();
+  pts.forEach((p) => b.extend(new kakao.maps.LatLng(p[0], p[1])));
+  map.setBounds(b, 40, 40, 200, 40);
+};
+window.setSatellite = (on) => map.setMapTypeId(on ? kakao.maps.MapTypeId.HYBRID : kakao.maps.MapTypeId.ROADMAP);
+window.selectItem = (id) => { selected = id; render(); };
+
+function overlay(lat, lng, el, yAnchor) {
+  const o = new kakao.maps.CustomOverlay({ position: new kakao.maps.LatLng(lat, lng), content: el, xAnchor: 0.5, yAnchor, clickable: true });
+  o.setMap(map);
+  overlays.push(o);
+}
+
+function pin(it, lat, lng) {
+  const el = document.createElement('div');
+  el.className = 'pin';
+  const c = it[0] === selected ? GOLD : COLORS[it[3]];
+  el.style.background = c;
+  el.style.borderTopColor = c;
+  el.style.zIndex = it[0] === selected ? 10 : 1;
+  el.textContent = it[4];
+  el.onclick = (e) => { e.stopPropagation(); selected = it[0]; render(); post({ type: 'select', id: it[0] }); };
+  overlay(lat, lng, el, 1.3);
+}
+
+function render() {
+  overlays.forEach((o) => o.setMap(null));
+  overlays = [];
+  const b = map.getBounds(), sw = b.getSouthWest(), ne = b.getNorthEast();
+  const vis = items.filter((i) => i[1] >= sw.getLat() && i[1] <= ne.getLat() && i[2] >= sw.getLng() && i[2] <= ne.getLng());
+  let clusters = 0;
+  if (vis.length <= MAX_PINS) {
+    const seen = {};
+    for (const it of vis) { // 같은 건물에 여러 건이면 살짝 흩어 놓는다
+      const k = (seen[it[1] + ',' + it[2]] = (seen[it[1] + ',' + it[2]] ?? -1) + 1);
+      pin(it, it[1] + 0.00012 * (k % 4), it[2] + 0.00016 * Math.floor(k / 4));
+    }
+  } else {
+    const deg = ((ne.getLng() - sw.getLng()) / document.getElementById('map').clientWidth) * 70; // 화면 70px 칸
+    const cells = {};
+    for (const it of vis) (cells[Math.floor(it[1] / deg) + ':' + Math.floor(it[2] / deg)] ??= []).push(it);
+    for (const c of Object.values(cells)) {
+      if (c.length === 1) { pin(c[0], c[0][1], c[0][2]); continue; }
+      const n = {};
+      c.forEach((i) => (n[i[3]] = (n[i[3]] ?? 0) + 1));
+      const top = Object.keys(n).sort((a, b) => n[b] - n[a])[0];
+      const lat = c.reduce((a, i) => a + i[1], 0) / c.length, lng = c.reduce((a, i) => a + i[2], 0) / c.length;
+      const el = document.createElement('div');
+      el.className = 'cl';
+      el.style.background = COLORS[top];
+      el.textContent = c.length > 999 ? (c.length / 1000).toFixed(1) + '천' : c.length;
+      el.onclick = (e) => { e.stopPropagation(); map.setLevel(Math.max(1, map.getLevel() - 2), { anchor: new kakao.maps.LatLng(lat, lng) }); };
+      overlay(lat, lng, el, 0.5);
+      clusters++;
+    }
+  }
+  post({ type: 'count', n: vis.length, clustered: clusters > 0 });
+}
+</script>
+</body>
+</html>
